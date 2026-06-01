@@ -6,7 +6,7 @@
   "host_permissions": [
     "*://leetcode.com/*",
     "*://localhost/*",
-    "*://leetcode-tracker-8t59tph00-ansgenixds-projects.vercel.app/*"
+    "*://leetcode-tracker-steel.vercel.app/*"
   ],
   "background": {
     "scripts": ["background.js"],
@@ -18,7 +18,7 @@
       "js": ["content-leetcode.js"]
     },
     {
-      "matches": ["http://localhost:3000/*", "https://leetcode-tracker-8t59tph00-ansgenixds-projects.vercel.app/*"],
+      "matches": ["http://localhost:3000/*", "https://leetcode-tracker-steel.vercel.app/*"],
       "js": ["content-dashboard.js"]
     }
   ]

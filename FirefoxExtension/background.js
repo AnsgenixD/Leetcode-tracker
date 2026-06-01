@@ -1,7 +1,7 @@
 // background.js
 const DASHBOARD_URLS = [
   "http://localhost:3000/*",
-  "https://leetcode-tracker-8t59tph00-ansgenixds-projects.vercel.app/*"  // ← add your real URL when you deploy
+  "https://leetcode-tracker-steel.vercel.app/*"  // ← add your real URL when you deploy
 ];
 
 let dashboardTabId = null;
