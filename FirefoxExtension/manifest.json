@@ -15,11 +15,17 @@
   "content_scripts": [
     {
       "matches": ["*://leetcode.com/problems/*"],
-      "js": ["content-leetcode.js"]
+      "js": ["content-leetcode.js"],
+      "run_at": "document_idle"
     },
     {
-      "matches": ["http://localhost:3000/*", "https://leetcode-tracker-steel.vercel.app/*"],
-      "js": ["content-dashboard.js"]
+      "matches": [
+        "http://localhost:3000/*",
+        "https://leetcode-tracker-steel.vercel.app/*"
+      ],
+      "js": ["content-dashboard.js"],
+      "run_at": "document_idle",
+      "all_frames": false
     }
   ]
 }
