@@ -10,14 +10,16 @@ function isDashboardUrl(url) {
   return DASHBOARD_URLS.some(base => url.startsWith(base));
 }
 
-browser.runtime.onMessage.addListener((message, sender) => {
-  if (message.type === "REGISTER_DASHBOARD") {
-    dashboardTabId = sender.tab.id;
-    console.log("[Background] Dashboard self-registered from tab", dashboardTabId);
-  }
-  // ... rest of listener
-});
+function isLocalhost() {
+  return dashboardTabId !== null && (() => {
+    // Check if the registered tab is localhost
+    return browser.tabs.get(dashboardTabId).then(tab => 
+      tab.url && tab.url.startsWith("http://localhost")
+    );
+  })();
+}
 
+// Check if dashboard is already open when extension loads
 browser.tabs.query({}).then((tabs) => {
   const dashboard = tabs.find(t => t.url && isDashboardUrl(t.url));
   if (dashboard) {
@@ -26,6 +28,7 @@ browser.tabs.query({}).then((tabs) => {
   }
 });
 
+// Watch for dashboard tab being opened or navigated to
 browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status === 'complete' && tab.url && isDashboardUrl(tab.url)) {
     dashboardTabId = tabId;
@@ -33,6 +36,7 @@ browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   }
 });
 
+// Catch already-loaded dashboard tab on focus
 browser.tabs.onActivated.addListener(({ tabId }) => {
   browser.tabs.get(tabId).then((tab) => {
     if (tab.url && isDashboardUrl(tab.url)) {
@@ -49,19 +53,8 @@ async function sendToDashboard(message) {
   }
 
   try {
-    // Force inject the content script first, ignore error if already injected
-    await browser.scripting.executeScript({
-      target: { tabId: dashboardTabId },
-      files: ["content-dashboard.js"],
-    }).catch(() => {
-      // Already injected, that's fine
-    });
-
-    // Small delay to let the script initialize
-    await new Promise(r => setTimeout(r, 100));
-
     await browser.tabs.sendMessage(dashboardTabId, message);
-    console.log("[Background] Relayed to dashboard tab", dashboardTabId);
+    console.log("[Background] SUCCESS: Relayed to dashboard tab", dashboardTabId);
   } catch (err) {
     console.error("[Background] Failed to relay:", err.message);
   }
@@ -70,17 +63,37 @@ async function sendToDashboard(message) {
 browser.runtime.onMessage.addListener((message, sender) => {
   console.log(`[Background] Heard '${message.type}' from`, sender.tab?.url);
 
+  if (message.type === "REGISTER_DASHBOARD") {
+    dashboardTabId = sender.tab.id;
+    console.log("[Background] Dashboard self-registered from tab", dashboardTabId);
+  }
+
   if (message.type === "NEW_PROBLEM") {
-    fetch("http://localhost:3000/api/problem", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(message.payload),
-    })
-    .then((res) => {
-      console.log("[Background] Dev server responded:", res.status);
-    })
-    .catch(() => {
-      console.log("[Background] Dev server unavailable, relaying via content script...");
+    // Only try localhost POST when dashboard is on localhost
+    browser.tabs.get(dashboardTabId).then(tab => {
+      const isLocal = tab.url && tab.url.startsWith("http://localhost");
+
+      if (isLocal) {
+        console.log("[Background] Dev mode: POSTing to localhost server...");
+        fetch("http://localhost:3000/api/problem", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(message.payload),
+        })
+        .then((res) => {
+          console.log("[Background] Localhost server responded:", res.status);
+        })
+        .catch((err) => {
+          console.warn("[Background] Localhost POST failed, falling back to content script:", err.message);
+          sendToDashboard(message);
+        });
+      } else {
+        console.log("[Background] Production mode: Relaying via content script to Vercel tab...");
+        sendToDashboard(message);
+      }
+    }).catch(() => {
+      // dashboardTabId is stale, fall back
+      console.warn("[Background] Dashboard tab lookup failed, attempting relay anyway...");
       sendToDashboard(message);
     });
   }
