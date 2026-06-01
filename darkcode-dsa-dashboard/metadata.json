@@ -1,0 +1,6 @@
+{
+  "name": "DSA Roadmap & LeetCode Tracker",
+  "description": "An offline-first, client-side, dark-mode single-page dashboard for tracking LeetCode problems and DSA studies with spaced repetition and simulated browser extension integration.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
