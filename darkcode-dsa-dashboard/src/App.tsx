@@ -227,66 +227,127 @@ export default function App() {
 
   // Browser Extension Simulation Engine (Global Window Function bound here)
   const handleExtensionPayload = useCallback((data: { url: string; timestamp?: number }) => {
-    if (!data || !data.url) {
-      addLog('unknown', 'ignored', 'Extension sent blank or corrupt data.');
-      return;
-    }
-    
-    const virtualNow = getVirtualTime();
-    const eventTime = data.timestamp || virtualNow;
-    const urlSlug = extractLeetCodeSlug(data.url);
-    
-    if (!urlSlug) {
-      addLog(data.url, 'no_match', 'Extension triggered: URL could not be parsed into a valid LeetCode slug.');
-      return;
-    }
+    try {
+      // Defensively clone to avoid Firefox cross-origin restrictions
+      const safeData = {
+        url: String(data?.url ?? ''),
+        timestamp: data?.timestamp ? Number(data.timestamp) : undefined
+      };
 
-    // Try finding a matching problem in our static/dynamic roadmap
-    const matchedProblem = roadmap
-      .flatMap(t => t.problems)
-      .find(p => p.id === urlSlug || extractLeetCodeSlug(p.url) === urlSlug);
+      if (!safeData.url) {
+        addLog('unknown', 'ignored', 'Extension sent blank or corrupt data.');
+        return;
+      }
+      
+      const virtualNow = getVirtualTime();
+      const eventTime = safeData.timestamp || virtualNow;
+      const urlSlug = extractLeetCodeSlug(safeData.url);
+      
+      if (!urlSlug) {
+        addLog(safeData.url, 'no_match', 'Extension triggered: URL could not be parsed into a valid LeetCode slug.');
+        return;
+      }
 
-    if (matchedProblem) {
-      // Problem exists. Let's mark as solved!
-      setProgress(prev => {
-        const alreadyTracked = prev[matchedProblem.id];
-        if (alreadyTracked && alreadyTracked.solved) {
-          // If already solved, let's treat this as a study rehearsal / review!
-          const nextIndex = Math.min(alreadyTracked.intervalIndex + 1, alreadyTracked.intervals.length);
-          const isMaxMastery = nextIndex >= alreadyTracked.intervals.length;
-          
-          let nextDue: number | null = null;
-          if (!isMaxMastery) {
-            nextDue = eventTime + (alreadyTracked.intervals[nextIndex] * 24 * 60 * 60 * 1000);
+      // Try finding a matching problem in our static/dynamic roadmap
+      const matchedProblem = roadmap
+        .flatMap(t => t.problems)
+        .find(p => p.id === urlSlug || extractLeetCodeSlug(p.url) === urlSlug);
+
+      if (matchedProblem) {
+        // Problem exists. Let's mark as solved!
+        setProgress(prev => {
+          const alreadyTracked = prev[matchedProblem.id];
+          if (alreadyTracked && alreadyTracked.solved) {
+            // If already solved, let's treat this as a study rehearsal / review!
+            const nextIndex = Math.min(alreadyTracked.intervalIndex + 1, alreadyTracked.intervals.length);
+            const isMaxMastery = nextIndex >= alreadyTracked.intervals.length;
+            
+            let nextDue: number | null = null;
+            if (!isMaxMastery) {
+              nextDue = eventTime + (alreadyTracked.intervals[nextIndex] * 24 * 60 * 60 * 1000);
+            }
+
+            const updated: ProblemProgress = {
+              ...alreadyTracked,
+              intervalIndex: nextIndex,
+              lastReviewedAt: eventTime,
+              nextReviewAt: nextDue,
+              history: [
+                ...alreadyTracked.history,
+                { action: 'reviewed', timestamp: eventTime }
+              ]
+            };
+
+            addLog(
+              safeData.url,
+              'matched',
+              `Extension Auto-Review: Detected solve iteration for '${matchedProblem.title}'. Advanced SRS level to ${nextIndex}/${alreadyTracked.intervals.length}.`,
+              matchedProblem.title
+            );
+
+            triggerSuccessAlert(`Extension Auto-Review matched! Advanced "${matchedProblem.title}" SRS to Level ${nextIndex}`);
+            return { ...prev, [matchedProblem.id]: updated };
+          } else {
+            // Solved for first time
+            const intervals = [1, 3, 7];
+            const nextDue = eventTime + (intervals[0] * 24 * 60 * 60 * 1000);
+            
+            const newRecord: ProblemProgress = {
+              problemId: matchedProblem.id,
+              solved: true,
+              solvedAt: eventTime,
+              intervals,
+              intervalIndex: 0,
+              lastReviewedAt: null,
+              nextReviewAt: nextDue,
+              history: [{ action: 'solved', timestamp: eventTime }]
+            };
+
+            addLog(
+              safeData.url,
+              'matched',
+              `Extension auto-solve: Matched '${matchedProblem.title}'. Marked as solved! Next spaced review scheduled in 1 day.`,
+              matchedProblem.title
+            );
+
+            triggerSuccessAlert(`Extension Auto-Solve! Resolved "${matchedProblem.title}" & added to 1d queue.`);
+            return { ...prev, [matchedProblem.id]: newRecord };
           }
+        });
+      } else {
+        // Problem not found in preset roadmap. Let's auto-create it under an "Extension Import" category inside the active roadmap or first topic!
+        const defaultTopicId = roadmap[0]?.id || 'arrays-hashing';
+        const formattedTitle = urlSlug
+          .split('-')
+          .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+          .join(' ');
 
-          const updated: ProblemProgress = {
-            ...alreadyTracked,
-            intervalIndex: nextIndex,
-            lastReviewedAt: eventTime,
-            nextReviewAt: nextDue,
-            history: [
-              ...alreadyTracked.history,
-              { action: 'reviewed', timestamp: eventTime }
-            ]
-          };
+        const newCustomProblem: LeetCodeProblem = {
+          id: urlSlug,
+          title: formattedTitle,
+          url: safeData.url,
+          difficulty: 'Medium', // Default guess
+          topicId: defaultTopicId
+        };
 
-          addLog(
-            data.url,
-            'matched',
-            `Extension Auto-Review: Detected solve iteration for '${matchedProblem.title}'. Advanced SRS level to ${nextIndex}/${alreadyTracked.intervals.length}.`,
-            matchedProblem.title
-          );
+        // Add to roadmap list
+        setRoadmap(prev => prev.map(topic => {
+          if (topic.id === defaultTopicId) {
+            return {
+              ...topic,
+              problems: [...topic.problems, newCustomProblem]
+            };
+          }
+          return topic;
+        }));
 
-          triggerSuccessAlert(`Extension Auto-Review matched! Advanced "${matchedProblem.title}" SRS to Level ${nextIndex}`);
-          return { ...prev, [matchedProblem.id]: updated };
-        } else {
-          // Solved for first time
+        // Now set progress
+        setProgress(prev => {
           const intervals = [1, 3, 7];
           const nextDue = eventTime + (intervals[0] * 24 * 60 * 60 * 1000);
           
           const newRecord: ProblemProgress = {
-            problemId: matchedProblem.id,
+            problemId: urlSlug,
             solved: true,
             solvedAt: eventTime,
             intervals,
@@ -297,76 +358,31 @@ export default function App() {
           };
 
           addLog(
-            data.url,
+            safeData.url,
             'matched',
-            `Extension auto-solve: Matched '${matchedProblem.title}'. Marked as solved! Next spaced review scheduled in 1 day.`,
-            matchedProblem.title
+            `Extension Auto-Import: Problem '${formattedTitle}' was not in standard track. Dynamically appended to '${roadmap[0].name}' and auto-solved!`,
+            formattedTitle
           );
 
-          triggerSuccessAlert(`Extension Auto-Solve! Resolved "${matchedProblem.title}" & added to 1d queue.`);
-          return { ...prev, [matchedProblem.id]: newRecord };
-        }
-      });
-    } else {
-      // Problem not found in preset roadmap. Let's auto-create it under an "Extension Import" category inside the active roadmap or first topic!
-      const defaultTopicId = roadmap[0]?.id || 'arrays-hashing';
-      const formattedTitle = urlSlug
-        .split('-')
-        .map(word => word.charAt(0).toUpperCase() + word.slice(1))
-        .join(' ');
-
-      const newCustomProblem: LeetCodeProblem = {
-        id: urlSlug,
-        title: formattedTitle,
-        url: data.url,
-        difficulty: 'Medium', // Default guess
-        topicId: defaultTopicId
-      };
-
-      // Add to roadmap list
-      setRoadmap(prev => prev.map(topic => {
-        if (topic.id === defaultTopicId) {
-          return {
-            ...topic,
-            problems: [...topic.problems, newCustomProblem]
-          };
-        }
-        return topic;
-      }));
-
-      // Now set progress
-      setProgress(prev => {
-        const intervals = [1, 3, 7];
-        const nextDue = eventTime + (intervals[0] * 24 * 60 * 60 * 1000);
-        
-        const newRecord: ProblemProgress = {
-          problemId: urlSlug,
-          solved: true,
-          solvedAt: eventTime,
-          intervals,
-          intervalIndex: 0,
-          lastReviewedAt: null,
-          nextReviewAt: nextDue,
-          history: [{ action: 'solved', timestamp: eventTime }]
-        };
-
-        addLog(
-          data.url,
-          'matched',
-          `Extension Auto-Import: Problem '${formattedTitle}' was not in standard track. Dynamically appended to '${roadmap[0].name}' and auto-solved!`,
-          formattedTitle
-        );
-
-        triggerSuccessAlert(`Extension Custom Import! Created & solved "${formattedTitle}" dynamically!`);
-        return { ...prev, [urlSlug]: newRecord };
-      });
+          triggerSuccessAlert(`Extension Custom Import! Created & solved "${formattedTitle}" dynamically!`);
+          return { ...prev, [urlSlug]: newRecord };
+        });
+      }
+    } catch (err: any) {
+      console.error("handleExtensionPayload CRASHED:", err?.message, err?.stack);
     }
   }, [getVirtualTime, roadmap, addLog]);
 
   useEffect(() => {
     const handler = (e: Event) => {
-      const payload = (e as CustomEvent).detail;
-      handleExtensionPayload(payload);
+      try {
+        const raw = (e as CustomEvent).detail;
+        const payload = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        console.log("leetcode:problem received:", payload);
+        handleExtensionPayload(payload);
+      } catch(err: any) {
+        console.error("Event handler CRASHED:", err?.message);
+      }
     };
 
     // Works in both dev and production
@@ -374,8 +390,14 @@ export default function App() {
 
     // Bonus: also works via Vite HMR in dev
     if ((import.meta as any).hot) {
-      (import.meta as any).hot.on('leetcode:problem', (payload: any) => {
-        handleExtensionPayload(payload);
+      (import.meta as any).hot.on('leetcode:problem', (raw: any) => {
+        try {
+          const payload = typeof raw === 'string' ? JSON.parse(raw) : raw;
+          console.log("leetcode:problem HMR received:", payload);
+          handleExtensionPayload(payload);
+        } catch(err: any) {
+          console.error("Event handler CRASHED:", err?.message);
+        }
       });
     }
 

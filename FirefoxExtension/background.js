@@ -10,7 +10,14 @@ function isDashboardUrl(url) {
   return DASHBOARD_URLS.some(base => url.startsWith(base));
 }
 
-// Check if dashboard is already open when extension loads
+browser.runtime.onMessage.addListener((message, sender) => {
+  if (message.type === "REGISTER_DASHBOARD") {
+    dashboardTabId = sender.tab.id;
+    console.log("[Background] Dashboard self-registered from tab", dashboardTabId);
+  }
+  // ... rest of listener
+});
+
 browser.tabs.query({}).then((tabs) => {
   const dashboard = tabs.find(t => t.url && isDashboardUrl(t.url));
   if (dashboard) {
@@ -19,7 +26,6 @@ browser.tabs.query({}).then((tabs) => {
   }
 });
 
-// Watch for dashboard tab being opened or navigated to
 browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status === 'complete' && tab.url && isDashboardUrl(tab.url)) {
     dashboardTabId = tabId;
@@ -27,7 +33,6 @@ browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   }
 });
 
-// Also catch if user switches to an already-loaded dashboard tab
 browser.tabs.onActivated.addListener(({ tabId }) => {
   browser.tabs.get(tabId).then((tab) => {
     if (tab.url && isDashboardUrl(tab.url)) {
@@ -36,6 +41,31 @@ browser.tabs.onActivated.addListener(({ tabId }) => {
     }
   });
 });
+
+async function sendToDashboard(message) {
+  if (!dashboardTabId) {
+    console.warn("[Background] No dashboard tab found!");
+    return;
+  }
+
+  try {
+    // Force inject the content script first, ignore error if already injected
+    await browser.scripting.executeScript({
+      target: { tabId: dashboardTabId },
+      files: ["content-dashboard.js"],
+    }).catch(() => {
+      // Already injected, that's fine
+    });
+
+    // Small delay to let the script initialize
+    await new Promise(r => setTimeout(r, 100));
+
+    await browser.tabs.sendMessage(dashboardTabId, message);
+    console.log("[Background] Relayed to dashboard tab", dashboardTabId);
+  } catch (err) {
+    console.error("[Background] Failed to relay:", err.message);
+  }
+}
 
 browser.runtime.onMessage.addListener((message, sender) => {
   console.log(`[Background] Heard '${message.type}' from`, sender.tab?.url);
@@ -51,13 +81,7 @@ browser.runtime.onMessage.addListener((message, sender) => {
     })
     .catch(() => {
       console.log("[Background] Dev server unavailable, relaying via content script...");
-      if (dashboardTabId) {
-        browser.tabs.sendMessage(dashboardTabId, message)
-          .then(() => console.log("[Background] Relayed to dashboard tab", dashboardTabId))
-          .catch((err) => console.error("[Background] Failed to relay:", err.message));
-      } else {
-        console.warn("[Background] No dashboard tab found!");
-      }
+      sendToDashboard(message);
     });
   }
 });
