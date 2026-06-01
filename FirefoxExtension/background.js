@@ -1,27 +1,46 @@
 // background.js
 const DASHBOARD_URLS = [
-  "http://localhost:3000/*",
-  "https://leetcode-tracker-steel.vercel.app/*"  // ← add your real URL when you deploy
+  "http://localhost:3000/",
+  "https://leetcode-tracker-steel.vercel.app/"
 ];
 
 let dashboardTabId = null;
 
-// Watch for the dashboard tab being opened
-browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (changeInfo.status === 'complete' && tab.url) {
-    const isDashboard = DASHBOARD_URLS.some(pattern => {
-      const regex = pattern.replace('*', '.*');
-      return new RegExp(regex).test(tab.url);
-    });
-    if (isDashboard) dashboardTabId = tabId;
+function isDashboardUrl(url) {
+  return DASHBOARD_URLS.some(base => url.startsWith(base));
+}
+
+// Check if dashboard is already open when extension loads
+browser.tabs.query({}).then((tabs) => {
+  const dashboard = tabs.find(t => t.url && isDashboardUrl(t.url));
+  if (dashboard) {
+    dashboardTabId = dashboard.id;
+    console.log("[Background] STARTUP: Found existing dashboard tab", dashboardTabId);
   }
+});
+
+// Watch for dashboard tab being opened or navigated to
+browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status === 'complete' && tab.url && isDashboardUrl(tab.url)) {
+    dashboardTabId = tabId;
+    console.log("[Background] UPDATED: Dashboard tab registered", dashboardTabId);
+  }
+});
+
+// Also catch if user switches to an already-loaded dashboard tab
+browser.tabs.onActivated.addListener(({ tabId }) => {
+  browser.tabs.get(tabId).then((tab) => {
+    if (tab.url && isDashboardUrl(tab.url)) {
+      dashboardTabId = tabId;
+      console.log("[Background] ACTIVATED: Dashboard tab registered", tabId);
+    }
+  });
 });
 
 browser.runtime.onMessage.addListener((message, sender) => {
   console.log(`[Background] Heard '${message.type}' from`, sender.tab?.url);
 
   if (message.type === "NEW_PROBLEM") {
-    // Try localhost first (dev), fall back to content script relay (prod)
     fetch("http://localhost:3000/api/problem", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -31,12 +50,13 @@ browser.runtime.onMessage.addListener((message, sender) => {
       console.log("[Background] Dev server responded:", res.status);
     })
     .catch(() => {
-      // Localhost not available — we're in production, use content script
       console.log("[Background] Dev server unavailable, relaying via content script...");
       if (dashboardTabId) {
-        browser.tabs.sendMessage(dashboardTabId, message);
+        browser.tabs.sendMessage(dashboardTabId, message)
+          .then(() => console.log("[Background] Relayed to dashboard tab", dashboardTabId))
+          .catch((err) => console.error("[Background] Failed to relay:", err.message));
       } else {
-        console.warn("[Background] No dashboard tab found either!");
+        console.warn("[Background] No dashboard tab found!");
       }
     });
   }
