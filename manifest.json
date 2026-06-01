@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "LeetEdge Tracker",
+  "version": "1.0",
+  "permissions": ["tabs"],
+  "host_permissions": [
+    "*://leetcode.com/*",
+    "*://localhost/*"
+  ],
+  "background": {
+    "scripts": ["background.js"],
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://leetcode.com/problems/*"],
+      "js": ["content-leetcode.js"]
+    },
+    {
+      "matches": ["http://localhost:3000/*", "https://your-vercel-url.vercel.app/*"],
+      "js": ["content-dashboard.js"]
+    }
+  ]
+}
