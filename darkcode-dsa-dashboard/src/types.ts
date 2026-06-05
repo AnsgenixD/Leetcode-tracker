@@ -25,8 +25,9 @@ export interface ProblemProgress {
   problemId: string;
   solved: boolean;
   solvedAt: number | null; // Timestamp
-  intervals: number[]; // e.g. [1, 3, 7]
-  intervalIndex: number; // current active index in intervals (0 = 1 day, 1 = 3 days, 2 = 7 days, 3 = fully Mastered)
+  repetitions: number;
+  easeFactor: number;
+  interval: number;
   lastReviewedAt: number | null; // Timestamp
   nextReviewAt: number | null; // Timestamp representing when it is due
   history: {

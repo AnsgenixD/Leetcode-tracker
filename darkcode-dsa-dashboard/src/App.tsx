@@ -40,6 +40,68 @@ const STATS_STORAGE_KEY = 'dsa_tracker_stats_v1';
 const ROADMAP_STORAGE_KEY = 'dsa_tracker_roadmap_v1';
 const EXT_LOG_STORAGE_KEY = 'dsa_tracker_ext_log_v1';
 
+function calculateSM2(
+  rating: 'Again' | 'Hard' | 'Good' | 'Easy' | undefined,
+  oldRepetitions: number,
+  oldInterval: number,
+  oldEaseFactor: number,
+  settings: { startingEase: number; maxInterval: number; hardModifier: number; easyBonus: number }
+): { repetitions: number; interval: number; easeFactor: number } {
+  let reps = oldRepetitions;
+  let interval = oldInterval;
+  let easeFactor = oldEaseFactor;
+
+  switch (rating) {
+    case 'Again':
+      reps = 0;
+      interval = 1;
+      easeFactor = Math.max(1.3, oldEaseFactor - 0.20);
+      break;
+    case 'Hard':
+      reps = 1;
+      interval = Math.max(1, Math.round(oldInterval * settings.hardModifier));
+      easeFactor = Math.max(1.3, oldEaseFactor - 0.15);
+      break;
+    case 'Good':
+      reps = oldRepetitions + 1;
+      interval =
+        oldRepetitions === 0 ? 1 :
+        oldRepetitions === 1 ? 6 :
+        Math.round(oldInterval * oldEaseFactor);
+      easeFactor = oldEaseFactor;
+      break;
+    case 'Easy':
+      reps = oldRepetitions + 1;
+      interval =
+        oldRepetitions === 0 ? 1 :
+        oldRepetitions === 1 ? 6 :
+        Math.round(oldInterval * oldEaseFactor * settings.easyBonus);
+      easeFactor = oldEaseFactor + 0.15;
+      break;
+    default:
+      // No rating provided (first detection, no overlay interaction) — treat as Good
+      reps = oldRepetitions + 1;
+      interval =
+        oldRepetitions === 0 ? 1 :
+        oldRepetitions === 1 ? 6 :
+        Math.round(oldInterval * oldEaseFactor);
+      easeFactor = oldEaseFactor;
+      break;
+  }
+
+  // Cap interval at maxInterval
+  if (interval > settings.maxInterval) {
+    interval = settings.maxInterval;
+  }
+
+  return {
+    repetitions: reps,
+    interval,
+    easeFactor
+  };
+}
+
+
 export default function App() {
   // --------- States ---------
   const [roadmap, setRoadmap] = useState<DSATopic[]>(() => {
@@ -57,6 +119,32 @@ export default function App() {
     return saved ? JSON.parse(saved) : { dailyGoal: 2, timeOffsetDays: 0 };
   });
 
+  const [algoSettings, setAlgoSettings] = useState(() => {
+    const saved = localStorage.getItem('dsa_tracker_algo_settings_v1');
+    return saved ? JSON.parse(saved) : {
+      startingEase: 2.50,
+      maxInterval: 120,
+      hardModifier: 1.2,
+      easyBonus: 1.3
+    };
+  });
+
+  const [timeOffset, setTimeOffset] = useState<number>(() => {
+    const saved = localStorage.getItem('dsa_tracker_time_offset_msg_v1');
+    if (saved) return Number(saved);
+    // fallback or migrate from stats.timeOffsetDays
+    const statsSaved = localStorage.getItem(STATS_STORAGE_KEY);
+    if (statsSaved) {
+      try {
+        const parsed = JSON.parse(statsSaved);
+        if (parsed.timeOffsetDays) {
+          return parsed.timeOffsetDays * 24 * 60 * 60 * 1000;
+        }
+      } catch (e) {}
+    }
+    return 0;
+  });
+
   const [logs, setLogs] = useState<ExtensionLogEntry[]>(() => {
     const saved = localStorage.getItem(EXT_LOG_STORAGE_KEY);
     return saved ? JSON.parse(saved) : [
@@ -71,7 +159,7 @@ export default function App() {
   });
 
   // UI Tabs & Interactive States
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'roadmap' | 'queue'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'roadmap' | 'queue' | 'settings'>('dashboard');
   const [expandedTopic, setExpandedTopic] = useState<string | null>('id-arrays-hashing');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedDifficultyFilter, setSelectedDifficultyFilter] = useState<string>('All');
@@ -104,11 +192,19 @@ export default function App() {
     localStorage.setItem(EXT_LOG_STORAGE_KEY, JSON.stringify(logs));
   }, [logs]);
 
+  useEffect(() => {
+    localStorage.setItem('dsa_tracker_algo_settings_v1', JSON.stringify(algoSettings));
+  }, [algoSettings]);
+
+  useEffect(() => {
+    localStorage.setItem('dsa_tracker_time_offset_msg_v1', String(timeOffset));
+  }, [timeOffset]);
+
   // --------- Time & Spaced Repetition Helpers ---------
   // Offset system clock visually for simulation
   const getVirtualTime = useCallback(() => {
-    return Date.now() + (stats.timeOffsetDays * 24 * 60 * 60 * 1000);
-  }, [stats.timeOffsetDays]);
+    return Date.now() + timeOffset;
+  }, [timeOffset]);
 
   const addLog = useCallback((url: string, status: 'matched' | 'no_match' | 'ignored', message: string, matchedTitle?: string) => {
     const newEntry: ExtensionLogEntry = {
@@ -143,15 +239,15 @@ export default function App() {
         return updated;
       } else {
         // Mark as solved initially
-        const intervals = [1, 3, 7]; // 1 day, 3 days, 7 days
-        const nextReviewAt = virtualNow + (intervals[0] * 24 * 60 * 60 * 1000);
+        const nextReviewAt = virtualNow + (1 * 24 * 60 * 60 * 1000);
         
         const newRecord: ProblemProgress = {
           problemId,
           solved: true,
           solvedAt: virtualNow,
-          intervals,
-          intervalIndex: 0,
+          repetitions: 1,
+          easeFactor: algoSettings.startingEase,
+          interval: 1,
           lastReviewedAt: null,
           nextReviewAt,
           history: [
@@ -173,29 +269,31 @@ export default function App() {
         };
       }
     });
-  }, [getVirtualTime, roadmap, addLog]);
+  }, [getVirtualTime, roadmap, addLog, algoSettings]);
 
   // Daily Edge Queue "Check In / Log Session" action: progress Spaced Repetition level
-  const handleReviewCheckIn = useCallback((problemId: string) => {
+  const handleReviewCheckIn = useCallback((problemId: string, rating?: 'Again' | 'Hard' | 'Good' | 'Easy') => {
     const virtualNow = getVirtualTime();
 
     setProgress(prev => {
       const current = prev[problemId];
       if (!current) return prev;
 
-      const nextIndex = current.intervalIndex + 1;
-      const isMaxMastery = nextIndex >= current.intervals.length;
-      
-      // Calculate next review due date
-      let nextReviewAt: number | null = null;
-      if (!isMaxMastery) {
-        const nextIntervalDays = current.intervals[nextIndex];
-        nextReviewAt = virtualNow + (nextIntervalDays * 24 * 60 * 60 * 1000);
-      }
+      const { repetitions: newRepetitions, interval: newInterval, easeFactor: newEaseFactor } = calculateSM2(
+        rating,
+        current.repetitions,
+        current.interval,
+        current.easeFactor,
+        algoSettings
+      );
+
+      const nextReviewAt = virtualNow + (newInterval * 24 * 60 * 60 * 1000);
 
       const updatedRecord: ProblemProgress = {
         ...current,
-        intervalIndex: nextIndex,
+        repetitions: newRepetitions,
+        easeFactor: newEaseFactor,
+        interval: newInterval,
         lastReviewedAt: virtualNow,
         nextReviewAt,
         history: [
@@ -205,9 +303,7 @@ export default function App() {
       };
 
       const targetProblem = roadmap.flatMap(t => t.problems).find(p => p.id === problemId);
-      const masteryMsg = isMaxMastery 
-        ? `Fully mastered! Completed all SRS cycles.` 
-        : `Level ${nextIndex + 1} Spaced Repitition scheduled in ${current.intervals[nextIndex]} days.`;
+      const masteryMsg = `Rating: ${rating || 'Good'}. Spaced repetition scheduled in ${newInterval} days (repetitions: ${newRepetitions}, EF: ${newEaseFactor.toFixed(2)}).`;
 
       addLog(
         targetProblem?.url || 'manual SRS',
@@ -216,22 +312,23 @@ export default function App() {
         targetProblem?.title
       );
 
-      triggerSuccessAlert(`Logged review for "${targetProblem?.title || 'Problem'}"! Current Level: ${nextIndex}/${current.intervals.length}`);
+      triggerSuccessAlert(`Logged review for "${targetProblem?.title || 'Problem'}" with ${rating || 'Good'}! Interval: ${newInterval}d`);
 
       return {
         ...prev,
         [problemId]: updatedRecord
       };
     });
-  }, [getVirtualTime, roadmap, addLog]);
+  }, [getVirtualTime, roadmap, addLog, algoSettings]);
 
   // Browser Extension Simulation Engine (Global Window Function bound here)
-  const handleExtensionPayload = useCallback((data: { url: string; timestamp?: number }) => {
-    try {
+const handleExtensionPayload = useCallback((data: { url: string; timestamp?: number; rating?: 'Again' | 'Hard' | 'Good' | 'Easy' }) => {
+      try {
       // Defensively clone to avoid Firefox cross-origin restrictions
       const safeData = {
         url: String(data?.url ?? ''),
-        timestamp: data?.timestamp ? Number(data.timestamp) : undefined
+        timestamp: data?.timestamp ? Number(data.timestamp) : undefined,
+        rating: data?.rating
       };
 
       if (!safeData.url) {
@@ -259,17 +356,21 @@ export default function App() {
           const alreadyTracked = prev[matchedProblem.id];
           if (alreadyTracked && alreadyTracked.solved) {
             // If already solved, let's treat this as a study rehearsal / review!
-            const nextIndex = Math.min(alreadyTracked.intervalIndex + 1, alreadyTracked.intervals.length);
-            const isMaxMastery = nextIndex >= alreadyTracked.intervals.length;
-            
-            let nextDue: number | null = null;
-            if (!isMaxMastery) {
-              nextDue = eventTime + (alreadyTracked.intervals[nextIndex] * 24 * 60 * 60 * 1000);
-            }
+            const { repetitions: newRepetitions, interval: newInterval, easeFactor: newEaseFactor } = calculateSM2(
+              safeData.rating,
+              alreadyTracked.repetitions,
+              alreadyTracked.interval,
+              alreadyTracked.easeFactor,
+              algoSettings
+            );
+
+            const nextDue = eventTime + (newInterval * 24 * 60 * 60 * 1000);
 
             const updated: ProblemProgress = {
               ...alreadyTracked,
-              intervalIndex: nextIndex,
+              repetitions: newRepetitions,
+              easeFactor: newEaseFactor,
+              interval: newInterval,
               lastReviewedAt: eventTime,
               nextReviewAt: nextDue,
               history: [
@@ -281,23 +382,23 @@ export default function App() {
             addLog(
               safeData.url,
               'matched',
-              `Extension Auto-Review: Detected solve iteration for '${matchedProblem.title}'. Advanced SRS level to ${nextIndex}/${alreadyTracked.intervals.length}.`,
+              `Extension Auto-Review: Detected solve iteration for '${matchedProblem.title}'. Next review scheduled in ${newInterval} days (EF: ${newEaseFactor.toFixed(2)}).`,
               matchedProblem.title
             );
 
-            triggerSuccessAlert(`Extension Auto-Review matched! Advanced "${matchedProblem.title}" SRS to Level ${nextIndex}`);
+            triggerSuccessAlert(`Extension Auto-Review matched! Scheduled "${matchedProblem.title}" review in ${newInterval} days.`);
             return { ...prev, [matchedProblem.id]: updated };
           } else {
             // Solved for first time
-            const intervals = [1, 3, 7];
-            const nextDue = eventTime + (intervals[0] * 24 * 60 * 60 * 1000);
+            const nextDue = eventTime + (1 * 24 * 60 * 60 * 1000);
             
             const newRecord: ProblemProgress = {
               problemId: matchedProblem.id,
               solved: true,
               solvedAt: eventTime,
-              intervals,
-              intervalIndex: 0,
+              repetitions: 1,
+              easeFactor: algoSettings.startingEase,
+              interval: 1,
               lastReviewedAt: null,
               nextReviewAt: nextDue,
               history: [{ action: 'solved', timestamp: eventTime }]
@@ -343,15 +444,15 @@ export default function App() {
 
         // Now set progress
         setProgress(prev => {
-          const intervals = [1, 3, 7];
-          const nextDue = eventTime + (intervals[0] * 24 * 60 * 60 * 1000);
+          const nextDue = eventTime + (1 * 24 * 60 * 60 * 1000);
           
           const newRecord: ProblemProgress = {
             problemId: urlSlug,
             solved: true,
             solvedAt: eventTime,
-            intervals,
-            intervalIndex: 0,
+            repetitions: 1,
+            easeFactor: algoSettings.startingEase,
+            interval: 1,
             lastReviewedAt: null,
             nextReviewAt: nextDue,
             history: [{ action: 'solved', timestamp: eventTime }]
@@ -371,7 +472,7 @@ export default function App() {
     } catch (err: any) {
       console.error("handleExtensionPayload CRASHED:", err?.message, err?.stack);
     }
-  }, [getVirtualTime, roadmap, addLog]);
+  }, [getVirtualTime, roadmap, addLog, algoSettings]);
 
   useEffect(() => {
     const handler = (e: Event) => {
@@ -768,6 +869,17 @@ export default function App() {
                 </span>
               )}
             </button>
+            <button
+              id="nav-tab-settings"
+              onClick={() => setActiveTab('settings')}
+              className={`px-3.5 py-1.5 text-xs font-medium rounded-lg transition-all duration-200 flex items-center gap-1.5 ${
+                activeTab === 'settings'
+                  ? 'bg-gradient-to-r from-teal-500/20 to-indigo-500/20 text-teal-300 shadow-[inset_0_1px_1px_rgba(255,255,255,0.1)] border border-teal-500/30'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-white/[0.02] border border-transparent'
+              }`}
+            >
+              Settings & Debug
+            </button>
           </nav>
         </div>
       </header>
@@ -775,23 +887,56 @@ export default function App() {
       {/* Main Container Wrapper */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
 
-        {/* Global Virtual Calendar Offset Status Indicator if Time Simulation is active */}
-        {stats.timeOffsetDays > 0 && (
-          <div className="mb-6 p-3 bg-gradient-to-r from-indigo-950 to-purple-950 border border-indigo-500/30 rounded-xl flex items-center justify-between text-xs text-indigo-200 shadow-lg">
-            <div className="flex items-center gap-2">
-              <Clock className="w-4 h-4 text-indigo-400 animate-spin" style={{ animationDuration: '6s' }} />
-              <span>
-                <strong>System Time Warp Active:</strong> Currently simulating <strong>+{stats.timeOffsetDays} Days</strong> in the future.
-              </span>
+        {/* Spaced Repetition Time Machine Widget */}
+        <div className="mb-6 p-4 bg-gradient-to-r from-slate-900 to-[#101421] border border-indigo-500/20 rounded-2xl flex flex-wrap items-center justify-between gap-4 shadow-lg">
+          <div className="flex items-center gap-2.5">
+            <div className="p-2 bg-indigo-500/10 text-indigo-400 rounded-xl">
+              <Clock className="w-4 h-4 animate-pulse text-indigo-400" />
             </div>
-            <button 
-              onClick={() => setStats(prev => ({ ...prev, timeOffsetDays: 0 }))}
-              className="px-2.5 py-1 bg-indigo-500/20 hover:bg-indigo-500/40 text-indigo-300 rounded border border-indigo-400/30 transition-all font-mono font-bold"
-            >
-              Reset Clock Offset
-            </button>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-bold text-white uppercase tracking-wider">Spaced Repetition Time Machine</span>
+                {timeOffset > 0 && (
+                  <span className="text-[10px] bg-indigo-500/25 text-indigo-300 px-1.5 py-0.2 rounded font-mono font-bold">
+                    +{(timeOffset / (24 * 60 * 60 * 1000)).toFixed(1)}d Simulated Future
+                  </span>
+                )}
+              </div>
+              <p className="text-[11px] text-slate-400 font-mono mt-0.5">
+                Current Sandbox Date: <strong className="text-indigo-300 font-bold">{new Date(getVirtualTime()).toISOString().replace('T', ' ').substring(0, 19)} UTC</strong>
+              </p>
+            </div>
           </div>
-        )}
+          
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setTimeOffset(prev => prev + 1 * 24 * 60 * 60 * 1000)}
+              className="px-2.5 py-1.5 bg-[#090b10] hover:bg-indigo-950/40 border border-white/5 hover:border-indigo-500/30 text-slate-300 hover:text-indigo-200 text-xs font-semibold rounded-lg transition"
+            >
+              +1 Day
+            </button>
+            <button
+              onClick={() => setTimeOffset(prev => prev + 3 * 24 * 60 * 60 * 1000)}
+              className="px-2.5 py-1.5 bg-[#090b10] hover:bg-indigo-950/40 border border-white/5 hover:border-indigo-500/30 text-slate-300 hover:text-indigo-200 text-xs font-semibold rounded-lg transition"
+            >
+              +3 Days
+            </button>
+            <button
+              onClick={() => setTimeOffset(prev => prev + 7 * 24 * 60 * 60 * 1000)}
+              className="px-2.5 py-1.5 bg-[#090b10] hover:bg-indigo-950/40 border border-white/5 hover:border-indigo-500/30 text-slate-300 hover:text-indigo-200 text-xs font-semibold rounded-lg transition"
+            >
+              +7 Days
+            </button>
+            {timeOffset !== 0 && (
+              <button
+                onClick={() => setTimeOffset(0)}
+                className="px-2.5 py-1.5 bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/20 text-rose-300 text-xs font-bold rounded-lg transition"
+              >
+                Reset Time
+              </button>
+            )}
+          </div>
+        </div>
 
         {/* ===================== VIEW 1: OVERVIEW DASHBOARD ===================== */}
         {activeTab === 'dashboard' && (
@@ -1354,20 +1499,53 @@ export default function App() {
 
                                     {/* Spaced Repetition Tags under Problems */}
                                     {isSolved && progRecord && (
-                                      <div className="flex flex-wrap gap-2 mt-1 items-center">
-                                        <span className="text-[9px] font-mono tracking-widest uppercase bg-emerald-500/10 text-emerald-300 border border-emerald-500/20 px-1.5 py-0.2 rounded">
-                                          Solved
-                                        </span>
-                                        {progRecord.nextReviewAt ? (
-                                          <span className="text-[9px] text-slate-400 font-mono bg-slate-900 border border-white/5 px-1.5 py-0.2 rounded flex items-center gap-1">
-                                            <Clock size={10} className="text-teal-400" />
-                                            Active SRS Level {progRecord.intervalIndex + 1}/3
+                                      <div className="mt-1 space-y-1.5">
+                                        <div className="flex flex-wrap gap-2 items-center">
+                                          <span className="text-[9px] font-mono tracking-widest uppercase bg-emerald-500/10 text-emerald-300 border border-emerald-500/20 px-1.5 py-0.2 rounded">
+                                            Solved
                                           </span>
-                                        ) : (
-                                          <span className="text-[9px] text-teal-400 font-mono bg-teal-500/5 border border-teal-500/10 px-1.5 py-0.2 rounded flex items-center gap-1 font-bold">
-                                            🌟 Mastered Fully
-                                          </span>
-                                        )}
+                                          {progRecord.nextReviewAt ? (
+                                            <span className="text-[9px] text-slate-400 font-mono bg-slate-900 border border-white/5 px-1.5 py-0.2 rounded flex items-center gap-1">
+                                              <Clock size={10} className="text-teal-400" />
+                                              Interval: {progRecord.interval}d (Reps: {progRecord.repetitions}, EF: {progRecord.easeFactor.toFixed(2)})
+                                            </span>
+                                          ) : (
+                                            <span className="text-[9px] text-teal-400 font-mono bg-teal-500/5 border border-teal-500/10 px-1.5 py-0.2 rounded flex items-center gap-1 font-bold">
+                                              🌟 Mastered Fully
+                                            </span>
+                                          )}
+                                        </div>
+                                        <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                                          <span className="text-[9px] text-slate-500 uppercase font-mono mr-1">Re-rate:</span>
+                                          <button
+                                            onClick={() => handleReviewCheckIn(prob.id, 'Again')}
+                                            className="px-1.5 py-0.5 bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/25 text-rose-300 rounded text-[9px] font-bold transition cursor-pointer"
+                                            title="Rate Again"
+                                          >
+                                            Again
+                                          </button>
+                                          <button
+                                            onClick={() => handleReviewCheckIn(prob.id, 'Hard')}
+                                            className="px-1.5 py-0.5 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/25 text-amber-300 rounded text-[9px] font-bold transition cursor-pointer"
+                                            title="Rate Hard"
+                                          >
+                                            Hard
+                                          </button>
+                                          <button
+                                            onClick={() => handleReviewCheckIn(prob.id, 'Good')}
+                                            className="px-1.5 py-0.5 bg-[#121f24] hover:bg-[#16272e] border border-teal-500/20 text-teal-300 rounded text-[9px] font-bold transition cursor-pointer"
+                                            title="Rate Good"
+                                          >
+                                            Good
+                                          </button>
+                                          <button
+                                            onClick={() => handleReviewCheckIn(prob.id, 'Easy')}
+                                            className="px-1.5 py-0.5 bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/25 text-blue-300 rounded text-[9px] font-bold transition cursor-pointer"
+                                            title="Rate Easy"
+                                          >
+                                            Easy
+                                          </button>
+                                        </div>
                                       </div>
                                     )}
                                   </div>
@@ -1445,7 +1623,7 @@ export default function App() {
                 <div>
                   <h2 className="text-sm font-bold text-white tracking-tight">Spaced Repetition Review Queue</h2>
                   <p className="text-xs text-slate-400 mt-0.5 leading-relaxed">
-                    Spaced repetition helps you retain coding solutions by reviewing them periodically. This system tracks solved items that have hit their scheduled review date (1-day, 3-day, and 7-day intervals). Keep your memory sharp by completing reviews on time under the Daily Due Queue.
+                    Spaced repetition helps you retain coding solutions by reviewing them periodically. This system tracks solved items that have hit their scheduled review date using the SM-2 algorithm. Keep your memory sharp by completing reviews on time under the Daily Due Queue.
                   </p>
                 </div>
               </div>
@@ -1473,8 +1651,7 @@ export default function App() {
                 </div>
               ) : (
                 spacedRepetitionQueue.map(({ problem, progress: progRecord }) => {
-                  const currentLevel = progRecord.intervalIndex;
-                  const currentIntervalDays = progRecord.intervals[currentLevel];
+                  const currentIntervalDays = progRecord.interval;
                   
                   return (
                     <div 
@@ -1505,26 +1682,251 @@ export default function App() {
                           <div className="flex items-center gap-4 mt-1.5 text-[10px] text-slate-400 font-mono">
                             <span className="flex items-center gap-1 font-semibold text-rose-300 bg-rose-500/10 px-1.5 py-0.5 rounded border border-rose-500/20">
                               <AlertCircle size={10} />
-                              Review Level #{currentLevel + 1} Due Now ({currentIntervalDays}d Cycle)
+                              Review Due Now ({currentIntervalDays}d Cycle)
                             </span>
                             <span>Solved: {new Date(progRecord.solvedAt || 0).toLocaleDateString()}</span>
                           </div>
                         </div>
                       </div>
 
-                      {/* Prominent Action Button */}
-                      <button
-                        onClick={() => handleReviewCheckIn(problem.id)}
-                        className="px-4 py-2 bg-gradient-to-r from-emerald-500/20 via-teal-500/10 to-teal-500/20 border border-emerald-500/35 hover:border-emerald-500/60 text-emerald-300 hover:text-emerald-200 text-xs font-semibold rounded-xl flex items-center gap-1.5 transition duration-200"
-                        id={`check-in-btn-${problem.id}`}
-                      >
-                        <Check size={14} />
-                        Check In & Log Session
-                      </button>
+                      {/* Prominent Action Buttons */}
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-[10px] text-slate-500 uppercase font-mono mr-1 hidden sm:inline">Self-Rate Problem:</span>
+                        <button
+                          onClick={() => handleReviewCheckIn(problem.id, 'Again')}
+                          className="px-3 py-1.5 bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-rose-400 text-xs font-bold rounded-xl transition cursor-pointer"
+                          title="Again (Reset progress, review in 1 day)"
+                        >
+                          Again
+                        </button>
+                        <button
+                          onClick={() => handleReviewCheckIn(problem.id, 'Hard')}
+                          className="px-3 py-1.5 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-400 text-xs font-bold rounded-xl transition cursor-pointer"
+                          title={`Hard (Scale interval x${algoSettings.hardModifier})`}
+                        >
+                          Hard
+                        </button>
+                        <button
+                          onClick={() => handleReviewCheckIn(problem.id, 'Good')}
+                          className="px-3 py-1.5 bg-[#121f24] hover:bg-[#16272e] border border-teal-500/25 text-teal-300 text-xs font-bold rounded-xl transition cursor-pointer"
+                          title="Good (Standard SM-2 interval increase)"
+                        >
+                          Good
+                        </button>
+                        <button
+                          onClick={() => handleReviewCheckIn(problem.id, 'Easy')}
+                          className="px-3 py-1.5 bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/30 text-blue-300 text-xs font-bold rounded-xl transition cursor-pointer"
+                          title={`Easy (Scale interval x${algoSettings.easyBonus})`}
+                        >
+                          Easy
+                        </button>
+                      </div>
                     </div>
                   );
                 })
               )}
+            </div>
+
+          </motion.div>
+        )}
+
+        {/* ===================== VIEW 4: ANKI SETTINGS & DEBUG ===================== */}
+        {activeTab === 'settings' && (
+          <motion.div 
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="space-y-6"
+            id="settings-tab-view"
+          >
+            {/* Header / Info box */}
+            <div className="p-5 bg-gradient-to-br from-[#121622] to-[#101421] border border-white/[0.04] rounded-2xl relative overflow-hidden">
+              <div className="absolute right-0 top-0 translate-x-5 -translate-y-5 p-10 bg-indigo-500/5 rounded-full blur-3xl"></div>
+              <div className="flex items-start gap-3">
+                <div className="p-2.5 bg-indigo-500/10 text-indigo-400 rounded-xl">
+                  <Activity className="w-5 h-5 animate-pulse" />
+                </div>
+                <div>
+                  <h2 className="text-sm font-bold text-white tracking-tight">Anki Algorithm Settings & Inspector</h2>
+                  <p className="text-xs text-slate-400 mt-0.5 leading-relaxed">
+                    Tune the core Spaced Repetition (SM-2) configurations to tailor intervals to your memory cycle, or inspect raw state records in real-time.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              
+              {/* SECTION A: ALGORITHM SETTINGS */}
+              <div className="bg-[#101421] border border-white/[0.04] rounded-2xl p-6 space-y-6 flex flex-col justify-between">
+                <div className="space-y-5">
+                  <div>
+                    <h3 className="text-sm font-bold text-white tracking-tight flex items-center gap-2">
+                      <span className="w-1.5 h-1.5 rounded-full bg-teal-400 animate-ping"></span>
+                      SM-2 Algorithm Configuration
+                    </h3>
+                    <p className="text-[11px] text-slate-400 mt-1 leading-relaxed">
+                      These adjust the multipliers and defaults used by the spaced repetition formula for reviews.
+                    </p>
+                  </div>
+
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1.5 flex items-center justify-between">
+                        <span>Starting Ease Factor</span>
+                        <span className="text-teal-400 font-mono font-normal">Default: 2.50</span>
+                      </label>
+                      <input 
+                        type="number" 
+                        step="0.05"
+                        min="1.3"
+                        max="4.0"
+                        value={algoSettings.startingEase}
+                        onChange={(e) => setAlgoSettings(prev => ({ ...prev, startingEase: parseFloat(e.target.value) || 2.5 }))}
+                        className="w-full bg-[#090b10] border border-white/[0.06] rounded-xl py-2 px-3 text-xs text-slate-200 font-mono focus:outline-none focus:border-teal-500 transition"
+                      />
+                      <p className="text-[10px] text-slate-500 mt-1">
+                        Lower values mean reviews will appear more frequently initially (recommended min: 1.3).
+                      </p>
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1.5 flex items-center justify-between">
+                        <span>Maximum Review Interval</span>
+                        <span className="text-teal-400 font-mono font-normal">Default: 120 days</span>
+                      </label>
+                      <input 
+                        type="number" 
+                        min="1"
+                        max="365"
+                        value={algoSettings.maxInterval}
+                        onChange={(e) => setAlgoSettings(prev => ({ ...prev, maxInterval: parseInt(e.target.value, 10) || 120 }))}
+                        className="w-full bg-[#090b10] border border-white/[0.06] rounded-xl py-2 px-3 text-xs text-slate-200 font-mono focus:outline-none focus:border-teal-500 transition"
+                      />
+                      <p className="text-[10px] text-slate-500 mt-1">
+                        The maximum possible interval (in days) a problem can reach before being capped.
+                      </p>
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1.5 flex items-center justify-between">
+                        <span>Hard Interval Modifier</span>
+                        <span className="text-teal-400 font-mono font-normal">Default: 1.20</span>
+                      </label>
+                      <input 
+                        type="number" 
+                        step="0.05"
+                        min="1.0"
+                        max="2.0"
+                        value={algoSettings.hardModifier}
+                        onChange={(e) => setAlgoSettings(prev => ({ ...prev, hardModifier: parseFloat(e.target.value) || 1.2 }))}
+                        className="w-full bg-[#090b10] border border-white/[0.06] rounded-xl py-2 px-3 text-xs text-slate-200 font-mono focus:outline-none focus:border-teal-500 transition"
+                      />
+                      <p className="text-[10px] text-slate-500 mt-1">
+                        Multiplier for previous interval when marking a problem as [Hard].
+                      </p>
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1.5 flex items-center justify-between">
+                        <span>Easy Bonus Modifier</span>
+                        <span className="text-teal-400 font-mono font-normal">Default: 1.30</span>
+                      </label>
+                      <input 
+                        type="number" 
+                        step="0.05"
+                        min="1.0"
+                        max="3.0"
+                        value={algoSettings.easyBonus}
+                        onChange={(e) => setAlgoSettings(prev => ({ ...prev, easyBonus: parseFloat(e.target.value) || 1.3 }))}
+                        className="w-full bg-[#090b10] border border-white/[0.06] rounded-xl py-2 px-3 text-xs text-slate-200 font-mono focus:outline-none focus:border-teal-500 transition"
+                      />
+                      <p className="text-[10px] text-slate-500 mt-1">
+                        Bonus multiplier applied on top of ease factor when marking a problem as [Easy].
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="pt-5 mt-6 border-t border-white/[0.04] flex items-center justify-between">
+                  <button
+                    onClick={() => {
+                      setAlgoSettings({
+                        startingEase: 2.50,
+                        maxInterval: 120,
+                        hardModifier: 1.2,
+                        easyBonus: 1.3
+                      });
+                      triggerSuccessAlert("SM-2 configurations restored to defaults!");
+                    }}
+                    className="px-3.5 py-1.5 border border-white/5 hover:border-white/10 hover:bg-white/5 text-slate-400 hover:text-slate-200 rounded-xl text-xs font-semibold transition cursor-pointer"
+                  >
+                    Restore Defaults
+                  </button>
+
+                  <button
+                    onClick={() => triggerSuccessAlert("Settings saved & updated instantly!")}
+                    className="px-3.5 py-1.5 bg-gradient-to-r from-teal-500/20 to-indigo-500/20 hover:from-teal-500/35 hover:to-indigo-500/35 text-teal-300 border border-teal-500/30 font-bold rounded-xl text-xs transition cursor-pointer"
+                  >
+                    Save Multipliers
+                  </button>
+                </div>
+              </div>
+
+              {/* SECTION B: RAW DATA INSPECTOR */}
+              <div className="bg-[#101421] border border-white/[0.04] rounded-2xl p-6 flex flex-col h-full justify-between space-y-4">
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h3 className="text-sm font-bold text-white tracking-tight flex items-center gap-2">
+                        <span className="w-1.5 h-1.5 rounded-full bg-indigo-400"></span>
+                        Local Storage Data Inspector
+                      </h3>
+                      <p className="text-[11px] text-slate-400 mt-0.5 leading-relaxed">
+                        Raw state object mapping active problems, easeFactors, repetitions, and nextReview deadlines.
+                      </p>
+                    </div>
+
+                    <button
+                      onClick={() => {
+                        if (window.confirm("CRITICAL WARNING: Are you sure you want to completely scrub all LeetCode progress data? This is irreversible!")) {
+                          setProgress({});
+                          triggerSuccessAlert("All user progress data deleted successfully!");
+                        }
+                      }}
+                      className="px-2.5 py-1 bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/20 text-rose-300 text-[10px] font-bold rounded transition"
+                    >
+                      Scrub Database
+                    </button>
+                  </div>
+
+                  {/* Search / filter progress view */}
+                  <div className="min-h-[320px] flex flex-col bg-[#090b10] border border-white/[0.04] rounded-xl overflow-hidden font-mono text-[10px]">
+                    <div className="p-2 border-b border-white/[0.04] bg-white/[0.02] flex items-center justify-between text-slate-500">
+                      <span>DATABASE: {PROGRESS_STORAGE_KEY}</span>
+                      <span>{Object.keys(progress).length} Problems Solved</span>
+                    </div>
+                    
+                    <div className="p-3 overflow-auto max-h-[350px] leading-relaxed text-slate-300">
+                      {Object.keys(progress).length === 0 ? (
+                        <div className="text-center py-12 text-slate-500 italic">No progress data stored yet! Check in or simulate an event first.</div>
+                      ) : (
+                        <pre className="whitespace-pre-wrap select-all text-[11px] leading-relaxed font-mono">
+                          {JSON.stringify(progress, null, 2)}
+                        </pre>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-slate-900/40 p-3 rounded-lg border border-white/[0.02]">
+                  <span className="text-[11px] font-bold text-slate-300 block mb-1">Sandbox Live Values Debug:</span>
+                  <div className="grid grid-cols-2 gap-2 text-[10px] font-mono text-slate-400">
+                    <div>At system now: <span className="text-slate-200">{new Date(Date.now()).toLocaleTimeString()}</span></div>
+                    <div>Virtual clock: <span className="text-teal-400 font-bold">{new Date(getVirtualTime()).toLocaleTimeString()}</span></div>
+                  </div>
+                </div>
+              </div>
+
             </div>
 
           </motion.div>
