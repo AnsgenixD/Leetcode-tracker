@@ -21,6 +21,12 @@ export interface DSATopic {
   problems: LeetCodeProblem[];
 }
 
+export interface ProblemHistoryEntry {
+  action: 'solved' | 'reviewed';
+  timestamp: number;
+  simulatedOffset?: number; // debug aid
+}
+
 export interface ProblemProgress {
   problemId: string;
   solved: boolean;
@@ -30,11 +36,7 @@ export interface ProblemProgress {
   interval: number;
   lastReviewedAt: number | null; // Timestamp
   nextReviewAt: number | null; // Timestamp representing when it is due
-  history: {
-    action: 'solved' | 'reviewed';
-    timestamp: number;
-    simulatedOffset?: number; // debug aid
-  }[];
+  history: ProblemHistoryEntry[];
 }
 
 export interface ExtensionLogEntry {
@@ -50,3 +52,26 @@ export interface UserStats {
   dailyGoal: number; // Number of problems targeted per day
   timeOffsetDays: number; // Debug offset in days to simulate time passage
 }
+
+export interface AlgoSettings {
+  startingEase: number;
+  maxInterval: number;
+  hardModifier: number;
+  easyBonus: number;
+}
+
+export interface RoadmapProblem {
+  id: string; // url slug
+  title: string;
+  difficulty: Difficulty;
+  category: string; // topic name (e.g. 'Arrays & Hashing', 'Linked Lists')
+  url: string;
+}
+
+export interface CuratedRoadmap {
+  id: string; // 'blind75', 'neetcode150', 'dsa-fundamentals'
+  name: string;
+  description: string;
+  problems: RoadmapProblem[];
+}
+
