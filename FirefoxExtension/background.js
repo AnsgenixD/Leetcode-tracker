@@ -51,45 +51,51 @@ async function sendToDashboard(message) {
   }
 }
 
-// ========== FIX #7: Optimized extension communication with concurrent logic ==========
-async function sendToDashboardWithFallback(message) {
+// ========== FIXED #7: Concurrent fetch + guaranteed tab messaging ==========
+async function handleNewProblem(message) {
   if (!dashboardTabId) {
     console.warn("[Background] No dashboard tab found!");
     return;
   }
 
   try {
-    // First, try to detect if we're on localhost
+    // Get tab info to check if localhost
     const tab = await browser.tabs.get(dashboardTabId).catch(() => null);
     
     if (!tab) {
-      console.warn("[Background] Dashboard tab lookup failed, attempting relay anyway...");
+      console.warn("[Background] Dashboard tab lookup failed, relaying to last known tab...");
       await sendToDashboard(message);
       return;
     }
 
     const isLocal = tab.url && tab.url.startsWith("http://localhost");
 
-    if (isLocal && message.type === "NEW_PROBLEM") {
-      console.log("[Background] Dev mode: POSTing to localhost server...");
-      try {
-        const res = await fetch("http://localhost:3000/api/problem", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(message.payload),
+    // Always send the tab message - this is guaranteed and critical for UI sync
+    const tabMessagePromise = sendToDashboard(message);
+
+    // If on localhost, also attempt server POST concurrently (non-blocking)
+    if (isLocal) {
+      console.log("[Background] Dev mode: POSTing to localhost server concurrently...");
+      fetch("http://localhost:3000/api/problem", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(message.payload),
+      })
+        .then((res) => {
+          console.log("[Background] Localhost server responded:", res.status);
+        })
+        .catch((err) => {
+          console.warn("[Background] Localhost POST failed (non-critical):", err.message);
+          // Non-blocking error - tab message already sent
         });
-        console.log("[Background] Localhost server responded:", res.status);
-        return;
-      } catch (localErr) {
-        console.warn("[Background] Localhost POST failed:", localErr.message);
-        // Fall through to relay via content script
-      }
+    } else {
+      console.log("[Background] Production mode: Tab message relayed to Vercel dashboard");
     }
 
-    console.log("[Background] Production/relay mode: Sending via content script to dashboard tab...");
-    await sendToDashboard(message);
+    // Wait for tab message to complete before returning
+    await tabMessagePromise;
   } catch (err) {
-    console.error("[Background] sendToDashboardWithFallback error:", err.message);
+    console.error("[Background] handleNewProblem error:", err.message);
   }
 }
 
@@ -102,9 +108,9 @@ browser.runtime.onMessage.addListener((message, sender) => {
   }
 
   if (message.type === "NEW_PROBLEM") {
-    // Use optimized fallback logic instead of sequential promises
-    sendToDashboardWithFallback(message).catch(err => {
-      console.error("[Background] Final error:", err.message);
+    // Always handle tab messaging first, with optional concurrent server fetch
+    handleNewProblem(message).catch(err => {
+      console.error("[Background] Final error in handleNewProblem:", err.message);
     });
   }
 });
