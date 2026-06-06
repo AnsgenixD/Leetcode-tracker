@@ -22,9 +22,8 @@ Mastering DSA requires **spaced repetition**—but the current solutions are bro
 
 **LeetCode Tracker** bridges the gap with a **decoupled architecture** that's immune to LeetCode's layout changes:
 
-1. **Native Overlay (Zero DOM Coupling)**: A floating card injects directly into `document.body`, asking for your confidence rating (Easy/Good/Hard/Again) *after* you solve a problem.
-2. **Offline-First React Dashboard**: All data lives in browser localStorage. Review anytime, track progress, and export your stats—no internet required.
-3. **Spaced Repetition Engine**: Built on the proven **SM-2 algorithm**, which calculates personalized review intervals based on your performance history.
+1. **Offline-First React Dashboard**: All data lives in browser localStorage. Review anytime, track progress, and export your stats—no internet required.
+2. **Spaced Repetition Engine**: Built on the proven **SM-2 algorithm**, which calculates personalized review intervals based on your performance history.
 
 The result? A seamless, resilient learning tool that survives LeetCode's CSS updates and doesn't steal your data.
 
@@ -47,7 +46,7 @@ Instead of scraping LeetCode's DOM (which breaks constantly), we inject a custom
 - **No fragile selectors. No CSS breakage. Zero maintenance.**
 
 ### ⏰ Time Machine Sandbox (Debug Tooling)
-Professional-grade state testing built in:
+time state testing built in:
 - Fast-forward/rewind through your review schedule
 - Simulate problem ratings and watch intervals recalculate
 - Test weak areas and verify algorithm behavior
