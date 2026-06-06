@@ -10,15 +10,6 @@ function isDashboardUrl(url) {
   return DASHBOARD_URLS.some(base => url.startsWith(base));
 }
 
-function isLocalhost() {
-  return dashboardTabId !== null && (() => {
-    // Check if the registered tab is localhost
-    return browser.tabs.get(dashboardTabId).then(tab => 
-      tab.url && tab.url.startsWith("http://localhost")
-    );
-  })();
-}
-
 // Check if dashboard is already open when extension loads
 browser.tabs.query({}).then((tabs) => {
   const dashboard = tabs.find(t => t.url && isDashboardUrl(t.url));
@@ -60,6 +51,48 @@ async function sendToDashboard(message) {
   }
 }
 
+// ========== FIX #7: Optimized extension communication with concurrent logic ==========
+async function sendToDashboardWithFallback(message) {
+  if (!dashboardTabId) {
+    console.warn("[Background] No dashboard tab found!");
+    return;
+  }
+
+  try {
+    // First, try to detect if we're on localhost
+    const tab = await browser.tabs.get(dashboardTabId).catch(() => null);
+    
+    if (!tab) {
+      console.warn("[Background] Dashboard tab lookup failed, attempting relay anyway...");
+      await sendToDashboard(message);
+      return;
+    }
+
+    const isLocal = tab.url && tab.url.startsWith("http://localhost");
+
+    if (isLocal && message.type === "NEW_PROBLEM") {
+      console.log("[Background] Dev mode: POSTing to localhost server...");
+      try {
+        const res = await fetch("http://localhost:3000/api/problem", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(message.payload),
+        });
+        console.log("[Background] Localhost server responded:", res.status);
+        return;
+      } catch (localErr) {
+        console.warn("[Background] Localhost POST failed:", localErr.message);
+        // Fall through to relay via content script
+      }
+    }
+
+    console.log("[Background] Production/relay mode: Sending via content script to dashboard tab...");
+    await sendToDashboard(message);
+  } catch (err) {
+    console.error("[Background] sendToDashboardWithFallback error:", err.message);
+  }
+}
+
 browser.runtime.onMessage.addListener((message, sender) => {
   console.log(`[Background] Heard '${message.type}' from`, sender.tab?.url);
 
@@ -69,32 +102,9 @@ browser.runtime.onMessage.addListener((message, sender) => {
   }
 
   if (message.type === "NEW_PROBLEM") {
-    // Only try localhost POST when dashboard is on localhost
-    browser.tabs.get(dashboardTabId).then(tab => {
-      const isLocal = tab.url && tab.url.startsWith("http://localhost");
-
-      if (isLocal) {
-        console.log("[Background] Dev mode: POSTing to localhost server...");
-        fetch("http://localhost:3000/api/problem", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(message.payload),
-        })
-        .then((res) => {
-          console.log("[Background] Localhost server responded:", res.status);
-        })
-        .catch((err) => {
-          console.warn("[Background] Localhost POST failed, falling back to content script:", err.message);
-          sendToDashboard(message);
-        });
-      } else {
-        console.log("[Background] Production mode: Relaying via content script to Vercel tab...");
-        sendToDashboard(message);
-      }
-    }).catch(() => {
-      // dashboardTabId is stale, fall back
-      console.warn("[Background] Dashboard tab lookup failed, attempting relay anyway...");
-      sendToDashboard(message);
+    // Use optimized fallback logic instead of sequential promises
+    sendToDashboardWithFallback(message).catch(err => {
+      console.error("[Background] Final error:", err.message);
     });
   }
 });
