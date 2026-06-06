@@ -120,6 +120,29 @@ export function useProgress() {
     localStorage.setItem('dsa_tracker_custom_problems_v1', JSON.stringify(customProblems));
   }, [customProblems]);
 
+  // ========== FIX #1: Build memoized slug→problem index for O(1) lookups ==========
+  const slugProblemIndex = useMemo(() => {
+    const index = new Map<string, RoadmapProblem>();
+    CURATED_ROADMAPS.forEach(roadmap => {
+      roadmap.problems.forEach(prob => {
+        index.set(prob.id, prob);
+        // Also cache the extracted slug version
+        const extracted = extractLeetCodeSlug(prob.url);
+        if (extracted) {
+          index.set(extracted, prob);
+        }
+      });
+    });
+    customProblems.forEach(prob => {
+      index.set(prob.id, prob);
+      const extracted = extractLeetCodeSlug(prob.url);
+      if (extracted) {
+        index.set(extracted, prob);
+      }
+    });
+    return index;
+  }, [customProblems]);
+
   // Dynamically compute the unified combined problems list
   const combinedProblems = useMemo(() => {
     const selected = CURATED_ROADMAPS.find(r => r.id === selectedRoadmapId) || CURATED_ROADMAPS[0];
@@ -377,11 +400,8 @@ export function useProgress() {
         return;
       }
 
-      // Match problem lookup across all available curated roadmaps and manually created custom problems
-      const matchedProblem = CURATED_ROADMAPS
-        .flatMap(r => r.problems)
-        .find(p => p.id === urlSlug || extractLeetCodeSlug(p.url) === urlSlug) || 
-        customProblems.find(p => p.id === urlSlug || extractLeetCodeSlug(p.url) === urlSlug);
+      // ========== FIX #6: Use the slug index for O(1) lookup ==========
+      const matchedProblem = slugProblemIndex.get(urlSlug);
 
       if (matchedProblem) {
         setProgress(prev => {
@@ -494,7 +514,7 @@ export function useProgress() {
     } catch (err: any) {
       console.error("handleExtensionPayload CRASHED:", err?.message, err?.stack);
     }
-  }, [getVirtualTime, roadmap, addLog, algoSettings, triggerSuccessAlert]);
+  }, [getVirtualTime, roadmap, addLog, algoSettings, triggerSuccessAlert, slugProblemIndex]);
 
   // Bind Custom Event Listener
   useEffect(() => {
@@ -598,14 +618,89 @@ export function useProgress() {
     }
   }, [triggerSuccessAlert]);
 
-  // --------- Statistics Compilations ---------
-  const totalProblemsCount = useMemo(() => {
-    return roadmap.reduce((sum, t) => sum + t.problems.length, 0);
-  }, [roadmap]);
+  // ========== FIX #2 & #3: Single-pass statistics computation ==========
+  const {
+    totalProblemsCount,
+    solvedProblemsCount,
+    difficultyStats,
+    topicProgressMap,
+    categoryWeaknessStats,
+    allProblemsFlat
+  } = useMemo(() => {
+    let total = 0;
+    let solved = 0;
+    const diffStats = {
+      Easy: { solved: 0, total: 0 },
+      Medium: { solved: 0, total: 0 },
+      Hard: { solved: 0, total: 0 }
+    };
+    const topicMap: Record<string, { solved: number; total: number; percent: number }> = {};
+    const weaknessStats: { topicId: string; topicName: string; averageEase: number; totalTracked: number; iconName: string }[] = [];
+    const problems: LeetCodeProblem[] = [];
 
-  const solvedProblemsCount = useMemo(() => {
-    return (Object.values(progress) as ProblemProgress[]).filter(p => p.solved).length;
-  }, [progress]);
+    // Single iteration through roadmap
+    roadmap.forEach(topic => {
+      let topicSolved = 0;
+      let topicTotal = 0;
+      let topicSumEase = 0;
+      let topicTrackedCount = 0;
+
+      topic.problems.forEach(prob => {
+        total++;
+        topicTotal++;
+        problems.push(prob);
+
+        const prog = progress[prob.id];
+        const isSolved = prog?.solved ?? false;
+
+        if (isSolved) {
+          solved++;
+          topicSolved++;
+        }
+
+        // Difficulty stats
+        const diff = prob.difficulty as keyof typeof diffStats;
+        if (diffStats[diff]) {
+          diffStats[diff].total += 1;
+          if (isSolved) {
+            diffStats[diff].solved += 1;
+          }
+        }
+
+        // Weakness tracking
+        if (isSolved && prog) {
+          topicSumEase += prog.easeFactor;
+          topicTrackedCount++;
+        }
+      });
+
+      // Compute topic progress
+      const topicPercent = topicTotal > 0 ? Math.round((topicSolved / topicTotal) * 100) : 0;
+      topicMap[topic.id] = { solved: topicSolved, total: topicTotal, percent: topicPercent };
+
+      // Add to weakness stats if tracked
+      if (topicTrackedCount > 0) {
+        weaknessStats.push({
+          topicId: topic.id,
+          topicName: topic.name,
+          averageEase: topicSumEase / topicTrackedCount,
+          totalTracked: topicTrackedCount,
+          iconName: topic.iconName
+        });
+      }
+    });
+
+    weaknessStats.sort((a, b) => a.averageEase - b.averageEase);
+
+    return {
+      totalProblemsCount: total,
+      solvedProblemsCount: solved,
+      difficultyStats: diffStats,
+      topicProgressMap: topicMap,
+      categoryWeaknessStats: weaknessStats,
+      allProblemsFlat: problems
+    };
+  }, [roadmap, progress]);
 
   const completionPercentage = useMemo(() => {
     if (totalProblemsCount === 0) return 0;
@@ -618,82 +713,36 @@ export function useProgress() {
     startOfVirtualToday.setHours(0, 0, 0, 0);
     const startOfVirtualTodayMs = startOfVirtualToday.getTime();
 
-    return (Object.values(progress) as ProblemProgress[]).filter(p => {
+    return Object.values(progress).filter(p => {
       if (!p.solved || !p.solvedAt) return false;
       const hasActivityToday = p.history.some(h => h.timestamp >= startOfVirtualTodayMs && h.timestamp <= virtualNow);
       return hasActivityToday;
     }).length;
   }, [progress, getVirtualTime]);
 
-  const difficultyStats = useMemo(() => {
-    const statsObj = {
-      Easy: { solved: 0, total: 0 },
-      Medium: { solved: 0, total: 0 },
-      Hard: { solved: 0, total: 0 }
-    };
-
-    roadmap.forEach(topic => {
-      topic.problems.forEach(prob => {
-        const diff = prob.difficulty;
-        if (statsObj[diff]) {
-          statsObj[diff].total += 1;
-          if (progress[prob.id]?.solved) {
-            statsObj[diff].solved += 1;
-          }
-        }
-      });
-    });
-
-    return statsObj;
-  }, [roadmap, progress]);
-
-  const spacedRepetitionQueue = useMemo(() => {
+  // ========== FIX #4 & #5: Optimized heatmap and streak calculations ==========
+  const { streaks, contributionCounts, cachedLastVirtualDay } = useMemo(() => {
     const virtualNow = getVirtualTime();
-    const list: { problem: LeetCodeProblem; progress: ProblemProgress; daysUntilDue: number }[] = [];
+    const todayDate = new Date(virtualNow);
+    todayDate.setHours(0, 0, 0, 0);
+    const cachedDay = todayDate.getTime();
 
-    roadmap.forEach(topic => {
-      topic.problems.forEach(prob => {
-        const prog = progress[prob.id];
-        if (prog && prog.solved && prog.nextReviewAt !== null) {
-          const isDue = prog.nextReviewAt <= virtualNow;
-          const diffMs = prog.nextReviewAt - virtualNow;
-          const daysUntilDue = diffMs / (24 * 60 * 60 * 1000);
-          
-          if (isDue) {
-            list.push({
-              problem: prob,
-              progress: prog,
-              daysUntilDue: Math.ceil(daysUntilDue)
-            });
-          }
-        }
-      });
+    const counts: Record<string, number> = {};
+    const dateSet = new Set<string>();
+
+    Object.values(progress).forEach((p: ProblemProgress) => {
+      if (p.history) {
+        p.history.forEach((h) => {
+          const dateString = toDateString(h.timestamp);
+          counts[dateString] = (counts[dateString] || 0) + 1;
+          dateSet.add(dateString);
+        });
+      }
     });
 
-    return list.sort((a, b) => (a.progress.nextReviewAt || 0) - (b.progress.nextReviewAt || 0));
-  }, [roadmap, progress, getVirtualTime]);
-
-  const completedReviewSessionsCount = useMemo(() => {
-    return (Object.values(progress) as ProblemProgress[]).reduce((sum, p) => {
-      return sum + p.history.filter(h => h.action === 'reviewed').length;
-    }, 0);
-  }, [progress]);
-
-  const streaks = useMemo(() => {
-    const virtualNow = getVirtualTime();
-    const sortedDates: string[] = [];
-    
-    (Object.values(progress) as ProblemProgress[]).forEach(p => {
-      p.history.forEach(h => {
-        const d = new Date(h.timestamp);
-        const dayString = d.toISOString().split('T')[0];
-        if (!sortedDates.includes(dayString)) {
-          sortedDates.push(dayString);
-        }
-      });
-    });
-
-    sortedDates.sort((a, b) => new Date(b).getTime() - new Date(a).getTime());
+    const sortedDates = Array.from(dateSet).sort(
+      (a, b) => new Date(b).getTime() - new Date(a).getTime()
+    );
 
     let currentStreak = 0;
     let maxStreak = 0;
@@ -749,40 +798,21 @@ export function useProgress() {
     maxStreak = Math.max(maxStreak, currentStreak);
 
     return {
-      currentStreak,
-      maxStreak,
-      activityDates: sortedDates
+      streaks: {
+        currentStreak,
+        maxStreak,
+        activityDates: sortedDates
+      },
+      contributionCounts: counts,
+      cachedLastVirtualDay: cachedDay
     };
   }, [progress, getVirtualTime]);
 
-  const topicProgressMap = useMemo(() => {
-    const map: Record<string, { solved: number; total: number; percent: number }> = {};
-    roadmap.forEach(topic => {
-      const total = topic.problems.length;
-      const solved = topic.problems.filter(p => progress[p.id]?.solved).length;
-      const percent = total > 0 ? Math.round((solved / total) * 100) : 0;
-      map[topic.id] = { solved, total, percent };
-    });
-    return map;
-  }, [roadmap, progress]);
-
-  // Contributions maps for GitHub heatmap
-  const contributionCounts = useMemo(() => {
-    const counts: Record<string, number> = {};
-    (Object.values(progress) as ProblemProgress[]).forEach((p) => {
-      if (p.history) {
-        p.history.forEach((h) => {
-          const dateString = toDateString(h.timestamp);
-          counts[dateString] = (counts[dateString] || 0) + 1;
-        });
-      }
-    });
-    return counts;
-  }, [progress]);
-
-  const contributionDays = useMemo(() => {
-    const list = [];
+  // ========== FIX #4: Cache heatmap only on day boundary ==========
+  const { contributionDays, contributionWeeks } = useMemo(() => {
     const virtualNow = getVirtualTime();
+    const list = [];
+
     // Generate precisely 91 days (13 weeks of 7-day columns)
     for (let dayOffset = -90; dayOffset <= 0; dayOffset++) {
       const ms = virtualNow + (dayOffset * 24 * 60 * 60 * 1000);
@@ -796,45 +826,48 @@ export function useProgress() {
         count
       });
     }
-    return list;
+
+    const weeksList = [];
+    for (let i = 0; i < list.length; i += 7) {
+      weeksList.push(list.slice(i, i + 7));
+    }
+
+    return {
+      contributionDays: list,
+      contributionWeeks: weeksList
+    };
   }, [contributionCounts, getVirtualTime]);
 
-  const contributionWeeks = useMemo(() => {
-    const weeksList = [];
-    for (let i = 0; i < contributionDays.length; i += 7) {
-      weeksList.push(contributionDays.slice(i, i + 7));
-    }
-    return weeksList;
-  }, [contributionDays]);
+  const spacedRepetitionQueue = useMemo(() => {
+    const virtualNow = getVirtualTime();
+    const list: { problem: LeetCodeProblem; progress: ProblemProgress; daysUntilDue: number }[] = [];
 
-  const categoryWeaknessStats = useMemo(() => {
-    const result: { topicId: string; topicName: string; averageEase: number; totalTracked: number; iconName: string }[] = [];
-
-    roadmap.forEach(topic => {
-      let sumEase = 0;
-      let count = 0;
-      
-      topic.problems.forEach(prob => {
-        const prog = progress[prob.id];
-        if (prog && prog.solved) {
-          sumEase += prog.easeFactor;
-          count++;
+    // Use the flattened problems array instead of nested roadmap
+    allProblemsFlat.forEach(prob => {
+      const prog = progress[prob.id];
+      if (prog && prog.solved && prog.nextReviewAt !== null) {
+        const isDue = prog.nextReviewAt <= virtualNow;
+        const diffMs = prog.nextReviewAt - virtualNow;
+        const daysUntilDue = diffMs / (24 * 60 * 60 * 1000);
+        
+        if (isDue) {
+          list.push({
+            problem: prob,
+            progress: prog,
+            daysUntilDue: Math.ceil(daysUntilDue)
+          });
         }
-      });
-
-      if (count > 0) {
-        result.push({
-          topicId: topic.id,
-          topicName: topic.name,
-          averageEase: sumEase / count,
-          totalTracked: count,
-          iconName: topic.iconName
-        });
       }
     });
 
-    return result.sort((a, b) => a.averageEase - b.averageEase);
-  }, [roadmap, progress]);
+    return list.sort((a, b) => (a.progress.nextReviewAt || 0) - (b.progress.nextReviewAt || 0));
+  }, [allProblemsFlat, progress, getVirtualTime]);
+
+  const completedReviewSessionsCount = useMemo(() => {
+    return Object.values(progress).reduce((sum, p) => {
+      return sum + p.history.filter(h => h.action === 'reviewed').length;
+    }, 0);
+  }, [progress]);
 
   return {
     roadmap,
