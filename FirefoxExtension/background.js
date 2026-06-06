@@ -51,72 +51,74 @@ browser.tabs.onActivated.addListener(({ tabId }) => {
   });
 });
 
+async function sendMessageWithRetry(tabId, message, maxRetries = 3, initialDelay = 100) {
+  let attempt = 0;
+  while (attempt < maxRetries) {
+    try {
+      await browser.tabs.sendMessage(tabId, message);
+      console.log(`[Background] SUCCESS: Relayed to tab ${tabId} on attempt ${attempt + 1}`);
+      return;
+    } catch (err) {
+      attempt++;
+      const isConnectionError = err.message && (
+        err.message.includes("Could not establish connection") || 
+        err.message.includes("Receiving end does not exist")
+      );
+      
+      console.warn(`[Background] Attempt ${attempt} failed for tab ${tabId}: ${err.message}`);
+      
+      if (isConnectionError && attempt === 1) {
+        console.log(`[Background] Connection failed for tab ${tabId}. Attempting dynamic content script injection...`);
+        try {
+          await browser.scripting.executeScript({
+            target: { tabId },
+            files: ["content-dashboard.js"]
+          });
+          // Small delay to allow listener to register
+          await new Promise(resolve => setTimeout(resolve, 100));
+        } catch (injectErr) {
+          console.error(`[Background] Dynamic injection failed for tab ${tabId}:`, injectErr.message);
+        }
+      }
+      
+      if (attempt < maxRetries) {
+        const backoffDelay = initialDelay * Math.pow(2, attempt - 1);
+        console.log(`[Background] Retrying tab ${tabId} in ${backoffDelay}ms (Attempt ${attempt + 1}/${maxRetries})...`);
+        await new Promise(resolve => setTimeout(resolve, backoffDelay));
+      } else {
+        console.error(`[Background] Failed to relay to tab ${tabId} after ${maxRetries} attempts.`);
+        throw err;
+      }
+    }
+  }
+}
+
 async function sendToDashboard(message) {
   try {
     const tabs = await browser.tabs.query({});
     const dashboardTabs = tabs.filter(t => t.url && isDashboardUrl(t.url));
 
+    const targets = [];
     if (dashboardTabs.length > 0) {
-      for (const tab of dashboardTabs) {
-        try {
-          await browser.tabs.sendMessage(tab.id, message);
-          console.log("[Background] SUCCESS: Relayed to dashboard tab via URL query", tab.id, tab.url);
-        } catch (err) {
-          if (err.message && (err.message.includes("Could not establish connection") || err.message.includes("Receiving end does not exist"))) {
-            console.log(`[Background] Connection failed for tab ${tab.id}. Attempting dynamic content script injection...`);
-            try {
-              await browser.scripting.executeScript({
-                target: { tabId: tab.id },
-                files: ["content-dashboard.js"]
-              });
-              // Small delay to allow listener to register
-              await new Promise(resolve => setTimeout(resolve, 100));
-              await browser.tabs.sendMessage(tab.id, message);
-              console.log("[Background] SUCCESS: Relayed to tab after dynamic script injection", tab.id);
-            } catch (injectErr) {
-              console.error(`[Background] Dynamic injection failed for tab ${tab.id}:`, injectErr.message);
-            }
-          } else {
-            console.error(`[Background] Failed to relay to tab ${tab.id}:`, err.message);
-          }
-        }
-      }
+      dashboardTabs.forEach(tab => targets.push(tab.id));
     } else if (dashboardTabId) {
-      console.log("[Background] No tabs matched query, attempting relay to registered dashboardTabId:", dashboardTabId);
-      try {
-        await browser.tabs.sendMessage(dashboardTabId, message);
-        console.log("[Background] SUCCESS: Relayed to registered dashboard tab", dashboardTabId);
-      } catch (err) {
-        if (err.message && (err.message.includes("Could not establish connection") || err.message.includes("Receiving end does not exist"))) {
-          console.log(`[Background] Connection failed for registered tab ${dashboardTabId}. Attempting dynamic content script injection...`);
-          try {
-            await browser.scripting.executeScript({
-              target: { tabId: dashboardTabId },
-              files: ["content-dashboard.js"]
-            });
-            await new Promise(resolve => setTimeout(resolve, 100));
-            await browser.tabs.sendMessage(dashboardTabId, message);
-            console.log("[Background] SUCCESS: Relayed to registered tab after dynamic script injection", dashboardTabId);
-          } catch (injectErr) {
-            console.error(`[Background] Dynamic injection failed for registered tab ${dashboardTabId}:`, injectErr.message);
-          }
-        } else {
-          console.error("[Background] Failed to relay to registered tab:", err.message);
-        }
-      }
-    } else {
+      targets.push(dashboardTabId);
+    }
+
+    if (targets.length === 0) {
       console.warn("[Background] No dashboard tab found!");
+      return;
     }
+
+    // De-duplicate target tab IDs
+    const uniqueTargets = [...new Set(targets)];
+
+    // Send concurrently to all unique targets
+    await Promise.allSettled(
+      uniqueTargets.map(tabId => sendMessageWithRetry(tabId, message))
+    );
   } catch (err) {
-    console.error("[Background] Failed to query tabs for relay:", err.message);
-    if (dashboardTabId) {
-      try {
-        await browser.tabs.sendMessage(dashboardTabId, message);
-        console.log("[Background] SUCCESS: Relayed to registered dashboard tab (fallback)", dashboardTabId);
-      } catch (fallbackErr) {
-        console.error("[Background] Fallback relay failed:", fallbackErr.message);
-      }
-    }
+    console.error("[Background] Failed in sendToDashboard query/relay:", err.message);
   }
 }
 

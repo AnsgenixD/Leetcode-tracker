@@ -1,7 +1,7 @@
 // src/App.tsx
 
-import { useState } from 'react';
-import { AnimatePresence, motion } from 'motion/react';
+import { useState, useEffect, useRef } from 'react';
+import { motion } from 'motion/react';
 import { 
   CheckCircle2, 
   Flame, 
@@ -26,6 +26,71 @@ import { DailyQueue } from './components/Dashboard/DailyQueue';
 import { RoadmapList } from './components/Roadmap/RoadmapList';
 import { SettingsDebug } from './components/Debug/SettingsDebug';
 
+function ToastNotification() {
+  const [message, setMessage] = useState<string | null>(null);
+  const [isExiting, setIsExiting] = useState(false);
+  const exitTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const clearTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  useEffect(() => {
+    const handleToast = (e: Event) => {
+      const msg = (e as CustomEvent<string>).detail;
+      setMessage(msg);
+      setIsExiting(false);
+
+      if (exitTimerRef.current) clearTimeout(exitTimerRef.current);
+      if (clearTimerRef.current) clearTimeout(clearTimerRef.current);
+
+      // Start exit animation after 3.8s
+      exitTimerRef.current = setTimeout(() => {
+        setIsExiting(true);
+      }, 3800);
+
+      // Remove toast completely after 4s
+      clearTimerRef.current = setTimeout(() => {
+        setMessage(null);
+        setIsExiting(false);
+      }, 4000);
+    };
+
+    document.addEventListener('dsa-tracker:toast', handleToast);
+    return () => {
+      document.removeEventListener('dsa-tracker:toast', handleToast);
+      if (exitTimerRef.current) clearTimeout(exitTimerRef.current);
+      if (clearTimerRef.current) clearTimeout(clearTimerRef.current);
+    };
+  }, []);
+
+  if (!message) return null;
+
+  const handleClose = () => {
+    setIsExiting(true);
+    if (clearTimerRef.current) clearTimeout(clearTimerRef.current);
+    clearTimerRef.current = setTimeout(() => {
+      setMessage(null);
+      setIsExiting(false);
+    }, 150); // Match fadeOut duration
+  };
+
+  return (
+    <div 
+      className={`fixed top-6 left-1/2 -translate-x-1/2 bg-[#121622] border-2 border-teal-500/60 shadow-[0_8px_30px_rgb(0,0,0,0.8)] px-5 py-3 rounded-xl flex items-center gap-3 text-sm font-medium text-teal-100 z-50 ${
+        isExiting ? 'animate-toast-out' : 'animate-toast-in'
+      }`}
+      id="toast-notification"
+    >
+      <div className="w-2 h-2 rounded-full bg-teal-400 animate-pulse"></div>
+      <span>{message}</span>
+      <button 
+        onClick={handleClose} 
+        className="ml-2 text-slate-400 hover:text-slate-100 p-0.5 cursor-pointer flex items-center justify-center font-sans"
+      >
+        <X size={15} />
+      </button>
+    </div>
+  );
+}
+
 export default function App() {
   // Navigation State
   const [activeTab, setActiveTab] = useState<'dashboard' | 'roadmap' | 'queue' | 'settings'>('dashboard');
@@ -45,8 +110,7 @@ export default function App() {
     setTimeOffset,
     logs,
     setLogs,
-    isSuccessActionAlert,
-    setIsSuccessActionAlert,
+
     
     // Core helpers
     getVirtualTime,
@@ -78,26 +142,7 @@ export default function App() {
       <div className="absolute top-0 left-0 right-0 h-[3px] bg-gradient-to-r from-teal-500 via-indigo-500 to-rose-500 shadow-[0_1px_20px_rgba(20,184,166,0.3)] z-50"></div>
 
       {/* Floating Action Event Success Toast */}
-      <AnimatePresence>
-        {isSuccessActionAlert && (
-          <motion.div 
-            initial={{ opacity: 0, y: -20, scale: 0.95 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: -10, scale: 0.95 }}
-            className="fixed top-6 left-1/2 -translate-x-1/2 bg-[#121622] border-2 border-teal-500/60 shadow-[0_8px_30px_rgb(0,0,0,0.8)] px-5 py-3 rounded-xl flex items-center gap-3 text-sm font-medium text-teal-100 z-50 animate-fade-in"
-            id="toast-notification"
-          >
-            <div className="w-2 h-2 rounded-full bg-teal-400 animate-pulse"></div>
-            <span>{isSuccessActionAlert}</span>
-            <button 
-              onClick={() => setIsSuccessActionAlert(null)} 
-              className="ml-2 text-slate-400 hover:text-slate-100 p-0.5 cursor-pointer flex items-center justify-center font-sans"
-            >
-              <X size={15} />
-            </button>
-          </motion.div>
-        )}
-      </AnimatePresence>
+      <ToastNotification />
 
       {/* Primary Navigation Shell */}
       <header className="sticky top-0 bg-[#090b10]/95 backdrop-blur-xl border-b border-white/[0.04] z-40">

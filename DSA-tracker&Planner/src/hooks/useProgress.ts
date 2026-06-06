@@ -234,8 +234,6 @@ export function useProgress() {
     ];
   });
 
-  // Floating actionable toast alert state
-  const [isSuccessActionAlert, setIsSuccessActionAlert] = useState<string | null>(null);
 
   // Persistence Effects
 
@@ -265,11 +263,8 @@ export function useProgress() {
   }, [timeOffset]);
 
   const triggerSuccessAlert = useCallback((message: string) => {
-    setIsSuccessActionAlert(message);
-    const id = setTimeout(() => {
-      setIsSuccessActionAlert(null);
-    }, 4000);
-    return () => clearTimeout(id);
+    const event = new CustomEvent('dsa-tracker:toast', { detail: message });
+    document.dispatchEvent(event);
   }, []);
 
   const addLog = useCallback((url: string, status: 'matched' | 'no_match' | 'ignored', message: string, matchedTitle?: string) => {
@@ -713,7 +708,7 @@ export function useProgress() {
     startOfVirtualToday.setHours(0, 0, 0, 0);
     const startOfVirtualTodayMs = startOfVirtualToday.getTime();
 
-    return Object.values(progress).filter(p => {
+    return (Object.values(progress) as ProblemProgress[]).filter(p => {
       if (!p.solved || !p.solvedAt) return false;
       const hasActivityToday = p.history.some(h => h.timestamp >= startOfVirtualTodayMs && h.timestamp <= virtualNow);
       return hasActivityToday;
@@ -864,7 +859,7 @@ export function useProgress() {
   }, [allProblemsFlat, progress, getVirtualTime]);
 
   const completedReviewSessionsCount = useMemo(() => {
-    return Object.values(progress).reduce((sum, p) => {
+    return (Object.values(progress) as ProblemProgress[]).reduce((sum, p) => {
       return sum + p.history.filter(h => h.action === 'reviewed').length;
     }, 0);
   }, [progress]);
@@ -884,8 +879,6 @@ export function useProgress() {
     setTimeOffset,
     logs,
     setLogs,
-    isSuccessActionAlert,
-    setIsSuccessActionAlert,
     
     // Virtual Clocks & Logging Actions
     getVirtualTime,
